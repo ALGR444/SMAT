@@ -1,164 +1,114 @@
-# database_manager.py
-import logging
-from datetime import datetime, timedelta
-from sqlalchemy import and_, desc
-from models import DatabaseManager, KlineData, Symbol
-import pandas as pd
+import sqlite3
+import os
+from datetime import datetime
+from typing import List, Optional, Tuple, Dict, Any
 
-class DataManager:
-    def __init__(self, db_path="data/smat.db"):
-        self.db_manager = DatabaseManager(db_path)
-        self.db_manager.init_database()
-        self.logger = logging.getLogger(__name__)
+class DatabaseManager:
+    def __init__(self, db_path: str = "data/smat.db"):
+        self.db_path = db_path
+        self.connection = None
+        self.cursor = None
+        self.init_database()
     
-    def store_klines(self, symbol, timeframe, klines_data):
-        """Сохранить данные свечей в базу данных"""
-        session = self.db_manager.get_session()
+    def init_database(self):
+        """Инициализация базы данных и создание таблиц если их нет"""
         try:
-            added_count = 0
-            updated_count = 0
+            # Создаем директорию если её нет
+            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
             
-            for kline in klines_data:
-                # Проверяем, существует ли уже запись
-                existing = session.query(KlineData).filter(
-                    and_(
-                        KlineData.symbol == symbol,
-                        KlineData.timeframe == timeframe,
-                        KlineData.timestamp == kline['timestamp']
-                    )
-                ).first()
+            self.connection = sqlite3.connect(self.db_path)
+            self.cursor = self.connection.cursor()
+            
+        except sqlite3.Error as e:
+            print(f"Ошибка инициализации базы данных: {e}")
+            raise
+
+    # МЕТОДЫ ДЛЯ GUI
+    
+    def get_unique_symbols(self) -> List[str]:
+        """Получение уникальных символов из БД"""
+        try:
+            self.cursor.execute("SELECT DISTINCT symbol FROM order_blocks ORDER BY symbol")
+            return [row[0] for row in self.cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f"Error getting unique symbols: {e}")
+            return []
+
+    def get_unique_timeframes(self) -> List[str]:
+        """Получение уникальных таймфреймов из БД"""
+        try:
+            self.cursor.execute("SELECT DISTINCT timeframe FROM order_blocks ORDER BY timeframe")
+            return [row[0] for row in self.cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f"Error getting unique timeframes: {e}")
+            return []
+
+    def get_order_blocks(self, symbol: Optional[str] = None, timeframe: Optional[str] = None) -> List[Tuple]:
+        """Получение ордер-блоков с фильтрацией - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+        try:
+            # Используем реальные названия колонок из вашей таблицы
+            query = """
+            SELECT id, symbol, timeframe, direction, confirmation_strength, 
+                   imbalance_high, is_confirmed, timestamp 
+            FROM order_blocks 
+            WHERE 1=1
+            """
+            params = []
+            
+            if symbol:
+                query += " AND symbol = ?"
+                params.append(symbol)
+            
+            if timeframe:
+                query += " AND timeframe = ?"
+                params.append(timeframe)
                 
-                if existing:
-                    # Обновляем существующую запись
-                    existing.open = kline['open']
-                    existing.high = kline['high']
-                    existing.low = kline['low']
-                    existing.close = kline['close']
-                    existing.volume = kline['volume']
-                    existing.turnover = kline.get('turnover')
-                    updated_count += 1
-                else:
-                    # Создаем новую запись
-                    new_kline = KlineData(
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        timestamp=kline['timestamp'],
-                        open=kline['open'],
-                        high=kline['high'],
-                        low=kline['low'],
-                        close=kline['close'],
-                        volume=kline['volume'],
-                        turnover=kline.get('turnover')
-                    )
-                    session.add(new_kline)
-                    added_count += 1
+            query += " ORDER BY timestamp DESC"
             
-            session.commit()
-            self.logger.info(f"Символ {symbol} ({timeframe}): добавлено {added_count}, обновлено {updated_count}")
-            return added_count + updated_count
+            print(f"Executing query: {query}")
+            self.cursor.execute(query, params)
+            blocks = self.cursor.fetchall()
+            print(f"Found {len(blocks)} blocks in database")
+            return blocks
             
-        except Exception as e:
-            session.rollback()
-            self.logger.error(f"Ошибка сохранения данных для {symbol}: {e}")
-            raise
-        finally:
-            session.close()
-    
-    def get_klines(self, symbol, timeframe, start_time=None, end_time=None, limit=1000):
-        """Получить данные свечей из базы данных"""
-        session = self.db_manager.get_session()
-        try:
-            query = session.query(KlineData).filter(
-                and_(
-                    KlineData.symbol == symbol,
-                    KlineData.timeframe == timeframe
-                )
-            )
-            
-            if start_time:
-                query = query.filter(KlineData.timestamp >= start_time)
-            if end_time:
-                query = query.filter(KlineData.timestamp <= end_time)
-            
-            query = query.order_by(KlineData.timestamp).limit(limit)
-            results = query.all()
-            
-            data = []
-            for row in results:
-                data.append({
-                    'timestamp': row.timestamp,
-                    'open': row.open,
-                    'high': row.high,
-                    'low': row.low,
-                    'close': row.close,
-                    'volume': row.volume,
-                    'turnover': row.turnover
-                })
-            
-            return data
-            
-        except Exception as e:
-            self.logger.error(f"Ошибка получения данных для {symbol}: {e}")
+        except sqlite3.Error as e:
+            print(f"Error getting order blocks: {e}")
             return []
-        finally:
-            session.close()
-    
-    def get_klines_df(self, symbol, timeframe, start_time=None, end_time=None, limit=1000):
-        """Получить данные в формате pandas DataFrame"""
-        data = self.get_klines(symbol, timeframe, start_time, end_time, limit)
-        if data:
-            df = pd.DataFrame(data)
-            df.set_index('timestamp', inplace=True)
-            return df
-        return pd.DataFrame()
-    
-    def get_last_timestamp(self, symbol, timeframe):
-        """Получить временную метку последней доступной свечи"""
-        session = self.db_manager.get_session()
+
+    def add_test_order_blocks(self):
+        """Добавление тестовых данных для демонстрации - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         try:
-            last_kline = session.query(KlineData).filter(
-                and_(
-                    KlineData.symbol == symbol,
-                    KlineData.timeframe == timeframe
+            # Используем реальную структуру таблицы
+            test_blocks = [
+                ('BTCUSDT', '1h', 'up', 0.8, 45000.0, 1, '2024-01-15 10:00:00'),
+                ('ETHUSDT', '4h', 'down', 0.6, 2500.0, 1, '2024-01-15 12:00:00'),
+                ('BTCUSDT', '1d', 'up', 0.9, 42000.0, 0, '2024-01-14 08:00:00'),
+                ('ADAUSDT', '1h', 'down', 0.7, 0.45, 1, '2024-01-15 14:00:00'),
+            ]
+            
+            for block in test_blocks:
+                symbol, timeframe, direction, confirmation_strength, imbalance_high, is_confirmed, timestamp = block
+                
+                self.cursor.execute(
+                    """INSERT OR IGNORE INTO order_blocks 
+                    (symbol, timeframe, direction, confirmation_strength, imbalance_high, is_confirmed, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (symbol, timeframe, direction, confirmation_strength, imbalance_high, is_confirmed, timestamp)
                 )
-            ).order_by(desc(KlineData.timestamp)).first()
             
-            return last_kline.timestamp if last_kline else None
+            self.connection.commit()
+            print("Added test order blocks")
             
-        except Exception as e:
-            self.logger.error(f"Ошибка получения последней временной метки для {symbol}: {e}")
-            return None
-        finally:
-            session.close()
-    
-    def get_available_symbols(self):
-        """Получить список доступных символов"""
-        session = self.db_manager.get_session()
-        try:
-            symbols = session.query(Symbol).filter(Symbol.is_active == True).all()
-            return [s.symbol for s in symbols]
-        except Exception as e:
-            self.logger.error(f"Ошибка получения списка символов: {e}")
-            return []
-        finally:
-            session.close()
-    
-    def update_symbols_from_bybit(self, bybit_api):
-        """Обновить список символов из Bybit API"""
-        try:
-            symbols_info = bybit_api.get_symbols_info()
-            symbols_list = []
-            
-            for symbol in symbols_info:
-                symbols_list.append({
-                    'symbol': symbol,
-                    'base_currency': symbol.replace('USDT', ''),
-                    'quote_currency': 'USDT'
-                })
-            
-            self.db_manager.add_symbols(symbols_list)
-            self.logger.info(f"Обновлено {len(symbols_list)} символов из Bybit")
-            
-        except Exception as e:
-            self.logger.error(f"Ошибка обновления символов из Bybit: {e}")
-            raise
+        except sqlite3.Error as e:
+            print(f"Error adding test data: {e}")
+
+    def close(self):
+        """Закрытие соединения с БД"""
+        if self.connection:
+            self.connection.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
